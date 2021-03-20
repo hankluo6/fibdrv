@@ -96,10 +96,11 @@ int main()
         clock_gettime(CLOCK_MONOTONIC, &t1);
         sz = read(fd, &val, sizeof(val));
         clock_gettime(CLOCK_MONOTONIC, &t2);
-        printf("sequence: %d ", i);
-        printf("userspace: %ld ", diff_in_ns(t1, t2));
-        printf("kernelspace: %ld ", get_ktime(1));
-        printf("copy_to_user %ld\n", get_ktime(0));
+        long int time = get_ktime(1) + get_ktime(0);
+        printf("%d ", i);
+        printf("%ld ", diff_in_ns(t1, t2));
+        printf("%ld ", time);
+        printf("%ld\n", diff_in_ns(t1, t2) - time);
 
         printf("Reading from " FIB_DEV " at offset %d, returned the sequence ",
                i);
