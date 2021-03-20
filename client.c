@@ -5,10 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define FIB_DEV "/dev/fibonacci"
-
+#define FIB_SYS "/sys/kernel/fib_time/"
 
 /* Copy from https://stackoverflow.com/a/11660651 */
 
@@ -35,9 +36,45 @@ static int print_u128_u(uint128_t u128)
     return rc;
 }
 
+/* Calculate difference of time */
+static time_t diff_in_ns(struct timespec t1, struct timespec t2)
+{
+    struct timespec diff;
+    if (t2.tv_nsec - t1.tv_nsec < 0) {
+        diff.tv_sec = t2.tv_sec - t1.tv_sec - 1;
+        diff.tv_nsec = t2.tv_nsec - t1.tv_nsec + 1000000000;
+    } else {
+        diff.tv_sec = t2.tv_sec - t1.tv_sec;
+        diff.tv_nsec = t2.tv_nsec - t1.tv_nsec;
+    }
+    return (diff.tv_sec * 1000000000.0 + diff.tv_nsec);
+}
+
+/* fib == 1 return calculated fibonacci time in kernel
+ * else return copy_to_user time in kernel
+ */
+static long int get_ktime(int fib)
+{
+    int kfd;
+    if (fib == 1)
+        kfd = open(FIB_SYS "fib_kt_ns", O_RDWR);
+    else
+        kfd = open(FIB_SYS "copy_kt_ns", O_RDWR);
+    if (kfd < 0) {
+        perror("Failed to open sys kobject");
+        exit(1);
+    }
+    char buf[64];
+    read(kfd, buf, 64);
+    close(kfd);
+    return atol(buf);
+}
+
 int main()
 {
     long long sz;
+
+    struct timespec t1, t2;
 
     uint128_t val;
     char write_buf[] = "testing writing";
@@ -56,7 +93,14 @@ int main()
 
     for (int i = 0; i <= offset; i++) {
         lseek(fd, i, SEEK_SET);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
         sz = read(fd, &val, sizeof(val));
+        clock_gettime(CLOCK_MONOTONIC, &t2);
+        printf("sequence: %d ", i);
+        printf("userspace: %ld ", diff_in_ns(t1, t2));
+        printf("kernelspace: %ld ", get_ktime(1));
+        printf("copy_to_user %ld\n", get_ktime(0));
+
         printf("Reading from " FIB_DEV " at offset %d, returned the sequence ",
                i);
         print_u128_u(val);
