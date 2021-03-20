@@ -1,9 +1,15 @@
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <malloc.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>      // Needed for mlockall()
+#include <sys/resource.h>  // needed for getrusage
+#include <sys/time.h>      // needed for getrusage
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -17,6 +23,8 @@ typedef unsigned __int128 uint128_t;
 
 #define P10_UINT64 10000000000000000000ULL /* 19 zeroes */
 #define E10_UINT64 19
+
+#define PRE_ALLOCATION_SIZE (40 * 1024 * 1024)
 
 #define STRINGIZER(x) #x
 #define TO_STRING(x) STRINGIZER(x)
@@ -70,8 +78,70 @@ static long int get_ktime(int fib)
     return atol(buf);
 }
 
+static void configure_malloc_behavior(void)
+{
+    /* Now lock all current and future pages
+    from preventing of being paged */
+    if (mlockall(MCL_CURRENT | MCL_FUTURE))
+        perror("mlockall failed:");
+
+    /* Turn off malloc trimming.*/
+    mallopt(M_TRIM_THRESHOLD, -1);
+
+    /* Turn off mmap usage. */
+    mallopt(M_MMAP_MAX, 0);
+}
+
+static void reserve_process_memory(int size)
+{
+    int i;
+    char *buffer;
+
+    buffer = malloc(size);
+
+    /* Touch each page in this piece of memory to get it mapped into RAM */
+    for (i = 0; i < size; i += sysconf(_SC_PAGESIZE)) {
+        /* Each write to this buffer will generate a pagefault.
+            Once the pagefault is handled a page will be locked in
+            memory and never given back to the system. */
+        buffer[i] = 0;
+    }
+
+    /* buffer will now be released. As Glibc is configured such that it
+        never gives back memory to the kernel, the memory allocated above is
+        locked for this process. All malloc() and new() calls come from
+        the memory pool reserved and locked above. Issuing free() and
+        delete() does NOT make this locking undone. So, with this locking
+        mechanism we can build C++ applications that will never run into
+        a major/minor pagefault, even with swapping enabled. */
+    free(buffer);
+}
+
+#ifdef DEBUG
+void show_new_pagefault_count(const char *logtext,
+                              const char *allowed_maj,
+                              const char *allowed_min)
+{
+    static int last_majflt = 0, last_minflt = 0;
+    struct rusage usage;
+
+    getrusage(RUSAGE_SELF, &usage);
+
+    printf(
+        "%-30.30s: Pagefaults, Major:%ld (Allowed %s), "
+        "Minor:%ld (Allowed %s)\n",
+        logtext, usage.ru_majflt - last_majflt, allowed_maj,
+        usage.ru_minflt - last_minflt, allowed_min);
+
+    last_majflt = usage.ru_majflt;
+    last_minflt = usage.ru_minflt;
+}
+#endif
+
 int main()
 {
+    configure_malloc_behavior();
+    reserve_process_memory(PRE_ALLOCATION_SIZE);
     long long sz;
 
     struct timespec t1, t2;
@@ -79,6 +149,7 @@ int main()
     uint128_t val;
     char write_buf[] = "testing writing";
     int offset = 100; /* TODO: try test something bigger than the limit */
+
 
     int fd = open(FIB_DEV, O_RDWR);
     if (fd < 0) {
@@ -91,6 +162,13 @@ int main()
         printf("Writing to " FIB_DEV ", returned the sequence %lld\n", sz);
     }
 
+    /* add these to prevent page faults or cache misses */
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    read(fd, &val, sizeof(val));
+
+#ifdef DEBUG
+    show_new_pagefault_count("Initial count", ">=0", ">=0");
+#endif
     for (int i = 0; i <= offset; i++) {
         lseek(fd, i, SEEK_SET);
         clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -107,7 +185,6 @@ int main()
         print_u128_u(val);
         printf(".\n");
     }
-
     for (int i = offset; i >= 0; i--) {
         lseek(fd, i, SEEK_SET);
         sz = read(fd, &val, sizeof(val));
@@ -116,7 +193,9 @@ int main()
         print_u128_u(val);
         printf(".\n");
     }
-
+#ifdef DEBUG
+    show_new_pagefault_count("Use generated", "=0", "=1");
+#endif
     close(fd);
     return 0;
 }
